@@ -415,6 +415,7 @@ fn test_stdin_redirect_dir() {
 // FIXME: If `std::io::ErrorKind::IsADirectory` becomes stable or macos handles
 //  redirected directories like linux show the correct message like in
 //  `test_stdin_redirect_dir`
+#[uutests::wasi_ignore(HostSystemStateDiffers)]
 #[test]
 #[cfg(target_vendor = "apple")]
 fn test_stdin_redirect_dir_when_target_os_is_macos() {
@@ -4293,6 +4294,7 @@ fn test_when_follow_retry_then_initial_print_of_file_is_written_to_stdout() {
 }
 
 // TODO: Add test for the warning `--pid=PID is not supported on this system`
+#[uutests::wasi_ignore(TailFollowDisabled)]
 #[test]
 fn test_args_when_settings_check_warnings_then_shows_warnings() {
     let scene = TestScenario::new(util_name!());
@@ -5336,7 +5338,6 @@ fn test_when_piped_input_then_no_broken_pipe() {
     }
 }
 
-#[uutests::wasi_ignore(ClosedStdoutGenericIoError)]
 #[test]
 #[cfg(unix)]
 fn test_when_output_closed_then_no_broken_pipe() {
@@ -5371,6 +5372,7 @@ fn test_child_when_run_with_stderr_to_stdout() {
 }
 
 #[cfg(target_os = "linux")]
+#[uutests::wasip2_ignore(StreamWriteGenericIoError)]
 #[test]
 fn test_failed_write_is_reported() {
     new_ucmd!()
@@ -5381,6 +5383,7 @@ fn test_failed_write_is_reported() {
 }
 
 #[cfg(target_os = "linux")]
+#[uutests::wasip2_ignore(StreamWriteGenericIoError)]
 #[test]
 fn test_multiple_input_files_failed_write_is_reported() {
     let (at, mut ucmd) = at_and_ucmd!();
@@ -5405,6 +5408,7 @@ fn test_failed_warning_write_is_reported() {
 }
 
 #[cfg(target_os = "linux")]
+#[uutests::wasip2_ignore(StreamWriteGenericIoError)]
 #[test]
 fn test_failed_write_is_reported_on_seekable_input() {
     let ts = TestScenario::new("tail");
@@ -5758,4 +5762,31 @@ fn test_header_quotes_name_with_control_char() {
     ucmd.args(&["-v", "-n1", "tab\there"])
         .succeeds()
         .stdout_only("==> 'tab'$'\\t''here' <==\nt\n");
+}
+
+#[test]
+fn test_huge_max_unchanged_stats_is_clamped() {
+    // A value beyond u32 and one beyond u128 are both clamped, like GNU.
+    for value in [
+        "99999999999999999999",
+        "999999999999999999999999999999999999999999",
+    ] {
+        new_ucmd!()
+            .arg(format!("--max-unchanged-stats={value}"))
+            .pipe_in("a\n")
+            .succeeds()
+            .stdout_only("a\n");
+    }
+}
+
+#[test]
+fn test_invalid_max_unchanged_stats_is_rejected() {
+    for value in ["-1", "abc"] {
+        new_ucmd!()
+            .arg(format!("--max-unchanged-stats={value}"))
+            .pipe_in("a\n")
+            .fails_with_code(1)
+            .stderr_contains("invalid maximum number of unchanged stats between opens: '")
+            .stderr_contains(value);
+    }
 }

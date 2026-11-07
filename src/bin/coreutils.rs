@@ -20,21 +20,13 @@ fn usage<T>(utils: &UtilityMap<T>, name: &str) {
     let display_list = utils.keys().copied().join(", ");
     let width = cmp::min(textwrap::termwidth(), 100) - 8; // (opinion/heuristic) max 100 chars wide with 4 character side indentions
     let indent_list = textwrap::indent(&textwrap::fill(&display_list, width), "    ");
-    #[cfg(feature = "feat_common_core")]
-    let common_core_string = "
-Functions:
-      '<uutils>' [arguments...]
-
-";
-    #[cfg(not(feature = "feat_common_core"))]
-    let common_core_string = "";
     let s = format!(
         "{name} {VERSION} (multi-call binary)
 
 Usage: {name} [function [arguments...]]
        {name} --list
 
-{common_core_string}Options:
+Options:
       --list    lists all defined functions, one per row
 
 Currently defined functions:
@@ -122,7 +114,12 @@ fn main() -> ExitCode {
             // #[cfg(not(feature = "only_english"))]
             validation::setup_localization_or_exit(util);
             let code = uumain(vec![util_os].into_iter().chain(args));
+            // WASI preview 2 maps every nonzero `ExitCode` returned from main to 1,
+            // so the code must go through exit to reach the host.
+            #[cfg(all(target_os = "wasi", target_env = "p2"))]
+            exit(code);
             // ExitCode only holds a u8; larger codes (Windows) go through exit.
+            #[cfg(not(all(target_os = "wasi", target_env = "p2")))]
             return u8::try_from(code).map_or_else(|_| exit(code), ExitCode::from);
         }
         // GNU coreutils --help string shows help for coreutils

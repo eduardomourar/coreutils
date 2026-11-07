@@ -787,9 +787,9 @@ fn null_line_endings() {
         .stdout_only_fixture("z.expected");
 }
 
+#[uutests::wasip2_ignore(StreamWriteGenericIoError)]
 #[test]
 #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "netbsd"))]
-#[cfg_attr(wasip2_runner, ignore = "WASI P2: /dev/full filesystem not available")]
 fn test_full() {
     let dev_full = OpenOptions::new().write(true).open("/dev/full").unwrap();
     new_ucmd!()
@@ -1051,4 +1051,13 @@ fn test_last_of_check_order_nocheck_order_wins() {
         .args(&["--nocheck-order", "--check-order", "a.txt", "a.txt"])
         .fails_with_code(1)
         .stderr_is("join: a.txt:2: is not sorted: a\n");
+}
+
+#[test]
+fn test_o_separate_field_operands() {
+    // GNU accepts -o fields as separate argv words when they follow -o.
+    new_ucmd!()
+        .args(&["-o", "1.1", "1.2", "2.2", "fields_1.txt", "fields_2.txt"])
+        .succeeds()
+        .stdout_only("1  a\n2  b\n3  c\n5  e\n8  h\n");
 }
