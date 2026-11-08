@@ -61,141 +61,164 @@ jobs:
               }
             };
 
-            // A locked conversation can't take new commands anyway, but
-            // check up front since it's free (already in the webhook payload).
-            if (context.payload.issue.locked) {
-              core.info('Issue is locked; ignoring the rerun request.');
-              return;
-            }
-
-            const commentBody = context.payload.comment.body.trim();
-            const workflowName = commentBody.slice('/rerun'.length).trim() || null;
-            const commenter = context.payload.comment.user.login;
-            const association = context.payload.comment.author_association;
-
-            const { data: pr } = await github.rest.pulls.get({
-              ...context.repo,
-              pull_number: context.issue.number,
-            });
-
-            if (pr.merged) {
-              core.info('PR is already merged; nothing to rerun.');
-              return;
-            }
-
-            const isMaintainer = ['OWNER', 'MEMBER', 'COLLABORATOR'].includes(association);
-            const isPrAuthor = commenter === pr.user.login;
-
-            if (!isMaintainer && !isPrAuthor) {
-              const message = `@${commenter} is not authorized to trigger a rerun on this PR.`;
+            try {
+              await run();
+            } catch (error) {
+              const message = `Rerun request failed: ${error.message}`;
               await react('-1', message);
               core.setFailed(message);
-              return;
             }
 
-            // 'head_sha' can collide across PRs (e.g. the same branch opened
-            // against two base branches), so also require the run to list
-            // this PR among its associated pull requests when GitHub reports
-            // any association, to avoid rerunning another PR's workflow run.
-            const belongsToThisPr = run =>
-              run.head_sha === pr.head.sha &&
-              (!run.pull_requests?.length || run.pull_requests.some(p => p.number === pr.number));
-
-            // Never rerun this very workflow: a matching run of it would
-            // otherwise be a candidate, and rerunning it from inside itself
-            // risks a recursive loop.
-            const isNotThisWorkflow = run => run.name !== context.workflow;
-
-            // Defense in depth: never rerun a run that isn't tied to this
-            // PR's current head commit, regardless of how it got into the
-            // candidate list.
-            const stillOnHead = run => {
-              if (run.head_sha !== pr.head.sha) {
-                core.warning(`Skipping run ${run.id}: head_sha ${run.head_sha} does not match PR head ${pr.head.sha}.`);
-                return false;
+            async function run() {
+              // A locked conversation can't take new commands anyway, but
+              // check up front since it's free (already in the webhook payload).
+              if (context.payload.issue.locked) {
+                core.info('Issue is locked; ignoring the rerun request.');
+                return;
               }
-              return true;
-            };
 
-            const rerunNames = [];
+              const commentBody = context.payload.comment.body.trim();
+              const workflowName = commentBody.slice('/rerun'.length).trim() || null;
+              const commenter = context.payload.comment.user.login;
+              const association = context.payload.comment.author_association;
 
-            if (workflowName) {
-              // A named rerun targets that workflow's latest run on the PR's
-              // head commit regardless of its conclusion, since the whole
-              // point of naming it is to force a fresh run.
-              const { data: runs } = await github.rest.actions.listWorkflowRunsForRepo({
+              const { data: pr } = await github.rest.pulls.get({
                 ...context.repo,
-                head_sha: pr.head.sha,
+                pull_number: context.issue.number,
               });
 
-              const matchingRuns = runs.workflow_runs
-                .filter(belongsToThisPr)
-                .filter(isNotThisWorkflow)
-                .filter(run => run.name.toLowerCase() === workflowName.toLowerCase())
-                .filter(stillOnHead);
-
-              if (matchingRuns.length === 0) {
-                const message = `No "${workflowName}" workflow run found for the PR head commit.`;
-                await react('confused', message);
-                core.info(message);
+              if (pr.merged) {
+                core.info('PR is already merged; nothing to rerun.');
                 return;
               }
 
-              for (const run of matchingRuns) {
-                core.info(`Re-running run ${run.id} (${run.name})`);
-                await github.rest.actions.reRunWorkflow({
-                  ...context.repo,
-                  run_id: run.id,
-                });
-                rerunNames.push(run.name);
-              }
-            } else {
-              // A plain '/rerun' only targets runs that are actually broken:
-              // failed runs get their failed jobs rerun, and cancelled runs
-              // get a full rerun.
-              const [{ data: failedRuns }, { data: cancelledRuns }] = await Promise.all([
-                github.rest.actions.listWorkflowRunsForRepo({
-                  ...context.repo,
-                  head_sha: pr.head.sha,
-                  status: 'failure',
-                }),
-                github.rest.actions.listWorkflowRunsForRepo({
-                  ...context.repo,
-                  head_sha: pr.head.sha,
-                  status: 'cancelled',
-                }),
-              ]);
+              const isMaintainer = ['OWNER', 'MEMBER', 'COLLABORATOR'].includes(association);
+              const isPrAuthor = commenter === pr.user.login;
 
-              const matchRuns = runs =>
-                runs.filter(belongsToThisPr).filter(isNotThisWorkflow).filter(stillOnHead);
-
-              const matchingFailedRuns = matchRuns(failedRuns.workflow_runs);
-              const matchingCancelledRuns = matchRuns(cancelledRuns.workflow_runs);
-
-              if (matchingFailedRuns.length === 0 && matchingCancelledRuns.length === 0) {
-                const message = 'No failed or cancelled workflow runs found for the PR head commit.';
-                await react('confused', message);
-                core.info(message);
+              if (!isMaintainer && !isPrAuthor) {
+                const message = `@${commenter} is not authorized to trigger a rerun on this PR.`;
+                await react('-1', message);
+                core.setFailed(message);
                 return;
               }
 
-              for (const run of matchingFailedRuns) {
-                core.info(`Re-running failed jobs of run ${run.id} (${run.name})`);
-                await github.rest.actions.reRunWorkflowFailedJobs({
+              // 'head_sha' can collide across PRs (e.g. the same branch opened
+              // against two base branches), so also require the run to list
+              // this PR among its associated pull requests when GitHub reports
+              // any association, to avoid rerunning another PR's workflow run.
+              const belongsToThisPr = run =>
+                run.head_sha === pr.head.sha &&
+                (!run.pull_requests?.length || run.pull_requests.some(p => p.number === pr.number));
+
+              // Never rerun this very workflow: a matching run of it would
+              // otherwise be a candidate, and rerunning it from inside itself
+              // risks a recursive loop.
+              const isNotThisWorkflow = run => run.name !== context.workflow;
+
+              // Defense in depth: never rerun a run that isn't tied to this
+              // PR's current head commit, regardless of how it got into the
+              // candidate list.
+              const stillOnHead = run => {
+                if (run.head_sha !== pr.head.sha) {
+                  core.warning(`Skipping run ${run.id}: head_sha ${run.head_sha} does not match PR head ${pr.head.sha}.`);
+                  return false;
+                }
+                return true;
+              };
+
+              const rerunNames = [];
+
+              // A run that is still queued or in progress can't be re-run; the
+              // API rejects it, so skip those instead of letting the call fail.
+              const isNotAlreadyRunning = run => !['queued', 'in_progress'].includes(run.status);
+
+              if (workflowName) {
+                // A named rerun targets that workflow's latest run on the PR's
+                // head commit regardless of its conclusion, since the whole
+                // point of naming it is to force a fresh run.
+                const { data: runs } = await github.rest.actions.listWorkflowRunsForRepo({
                   ...context.repo,
-                  run_id: run.id,
+                  head_sha: pr.head.sha,
                 });
-                rerunNames.push(run.name);
+
+                const allMatchingRuns = runs.workflow_runs
+                  .filter(belongsToThisPr)
+                  .filter(isNotThisWorkflow)
+                  .filter(run => run.name.toLowerCase() === workflowName.toLowerCase())
+                  .filter(stillOnHead);
+
+                if (allMatchingRuns.length === 0) {
+                  const message = `No "${workflowName}" workflow run found for the PR head commit.`;
+                  await react('confused', message);
+                  core.info(message);
+                  return;
+                }
+
+                const matchingRuns = allMatchingRuns.filter(isNotAlreadyRunning);
+
+                if (matchingRuns.length === 0) {
+                  const message = `"${workflowName}" is already running for this PR; wait for it to finish.`;
+                  await react('confused', message);
+                  core.info(message);
+                  return;
+                }
+
+                for (const run of matchingRuns) {
+                  core.info(`Re-running run ${run.id} (${run.name})`);
+                  await github.rest.actions.reRunWorkflow({
+                    ...context.repo,
+                    run_id: run.id,
+                  });
+                  rerunNames.push(run.name);
+                }
+              } else {
+                // A plain '/rerun' only targets runs that are actually broken:
+                // failed runs get their failed jobs rerun, and cancelled runs
+                // get a full rerun.
+                const [{ data: failedRuns }, { data: cancelledRuns }] = await Promise.all([
+                  github.rest.actions.listWorkflowRunsForRepo({
+                    ...context.repo,
+                    head_sha: pr.head.sha,
+                    status: 'failure',
+                  }),
+                  github.rest.actions.listWorkflowRunsForRepo({
+                    ...context.repo,
+                    head_sha: pr.head.sha,
+                    status: 'cancelled',
+                  }),
+                ]);
+
+                const matchRuns = runs =>
+                  runs.filter(belongsToThisPr).filter(isNotThisWorkflow).filter(stillOnHead);
+
+                const matchingFailedRuns = matchRuns(failedRuns.workflow_runs);
+                const matchingCancelledRuns = matchRuns(cancelledRuns.workflow_runs);
+
+                if (matchingFailedRuns.length === 0 && matchingCancelledRuns.length === 0) {
+                  const message = 'No failed or cancelled workflow runs found for the PR head commit.';
+                  await react('confused', message);
+                  core.info(message);
+                  return;
+                }
+
+                for (const run of matchingFailedRuns) {
+                  core.info(`Re-running failed jobs of run ${run.id} (${run.name})`);
+                  await github.rest.actions.reRunWorkflowFailedJobs({
+                    ...context.repo,
+                    run_id: run.id,
+                  });
+                  rerunNames.push(run.name);
+                }
+
+                for (const run of matchingCancelledRuns) {
+                  core.info(`Re-running cancelled run ${run.id} (${run.name})`);
+                  await github.rest.actions.reRunWorkflow({
+                    ...context.repo,
+                    run_id: run.id,
+                  });
+                  rerunNames.push(run.name);
+                }
               }
 
-              for (const run of matchingCancelledRuns) {
-                core.info(`Re-running cancelled run ${run.id} (${run.name})`);
-                await github.rest.actions.reRunWorkflow({
-                  ...context.repo,
-                  run_id: run.id,
-                });
-                rerunNames.push(run.name);
-              }
+              await react('+1', `Reran: ${rerunNames.join(', ')}`);
             }
-
-            await react('+1', `Reran: ${rerunNames.join(', ')}`);
