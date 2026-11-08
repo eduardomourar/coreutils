@@ -1,0 +1,99 @@
+name: Rerun PR Workflows on Comment
+
+# spell-checker:ignore octokit
+
+# Let PR authors and maintainers re-run CI from a PR comment, since
+# non-collaborators have no "Re-run jobs" button in the UI and labels
+# cannot be added to PRs from outside the repo.
+#
+# Only failed workflow runs can be rerun through the Actions API, so the
+# commands below always target failed runs on the PR's head commit.
+#
+# Comment commands:
+#   /rerun                  - re-run the failed jobs of every failed workflow
+#   /rerun <workflow name>  - re-run the failed jobs of one named workflow
+#                             (e.g. "GnuTests")
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions: {}
+
+jobs:
+  rerun:
+    if: >
+      github.event.issue.pull_request != null &&
+      (
+        github.event.comment.body == '/rerun' ||
+        startsWith(github.event.comment.body, '/rerun ')
+      )
+    runs-on: ubuntu-slim
+    permissions:
+      actions: write #  to list and re-run workflow runs
+      pull-requests: read #  to read PR head sha and author
+      issues: write #  to react to the triggering comment
+    steps:
+      - name: "Re-run failed CI for this PR"
+        uses: actions/github-script@v9
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const commentBody = context.payload.comment.body.trim();
+            const workflowName = commentBody.slice('/rerun'.length).trim() || null;
+            const commenter = context.payload.comment.user.login;
+            const association = context.payload.comment.author_association;
+
+            const { data: pr } = await github.rest.pulls.get({
+              ...context.repo,
+              pull_number: context.issue.number,
+            });
+
+            const isMaintainer = ['OWNER', 'MEMBER', 'COLLABORATOR'].includes(association);
+            const isPrAuthor = commenter === pr.user.login;
+
+            if (!isMaintainer && !isPrAuthor) {
+              await github.rest.reactions.createForIssueComment({
+                ...context.repo,
+                comment_id: context.payload.comment.id,
+                content: '-1',
+              });
+              core.setFailed(`${commenter} is not authorized to trigger a rerun on this PR.`);
+              return;
+            }
+
+            const { data: runs } = await github.rest.actions.listWorkflowRunsForRepo({
+              ...context.repo,
+              head_sha: pr.head.sha,
+              status: 'failure',
+            });
+
+            const matchingRuns = workflowName
+              ? runs.workflow_runs.filter(run => run.name.toLowerCase() === workflowName.toLowerCase())
+              : runs.workflow_runs;
+
+            if (matchingRuns.length === 0) {
+              await github.rest.reactions.createForIssueComment({
+                ...context.repo,
+                comment_id: context.payload.comment.id,
+                content: 'confused',
+              });
+              core.info(workflowName
+                ? `No failed "${workflowName}" workflow run found for the PR head commit.`
+                : 'No failed workflow runs found for the PR head commit.');
+              return;
+            }
+
+            for (const run of matchingRuns) {
+              core.info(`Re-running failed jobs of run ${run.id} (${run.name})`);
+              await github.rest.actions.reRunWorkflowFailedJobs({
+                ...context.repo,
+                run_id: run.id,
+              });
+            }
+
+            await github.rest.reactions.createForIssueComment({
+              ...context.repo,
+              comment_id: context.payload.comment.id,
+              content: '+1',
+            });
