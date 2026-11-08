@@ -29,9 +29,16 @@ jobs:
         startsWith(github.event.comment.body, '/rerun ')
       )
     runs-on: ubuntu-slim
+    # One rerun request per PR at a time, so repeated `/rerun` comments queue
+    # instead of stacking up duplicate API calls.
+    concurrency:
+      group: rerun-trigger-${{ github.event.issue.number }}
     permissions:
       actions: write #  to list and re-run workflow runs
-      pull-requests: read #  to read PR head sha and author
+      # 'write' because posting the fallback comment targets a PR number,
+      # and (like SizeComment.yml) that needs pull-requests:write even
+      # though the comments/reactions API docs say 'issues'.
+      pull-requests: write #  to read PR head sha/author, and comment as a fallback
       issues: write #  to react to the triggering comment
     steps:
       - name: "Re-run failed CI for this PR"
@@ -39,6 +46,31 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
+            // A reaction is just feedback on the comment; never let a failure
+            // to post one (e.g. missing 'issues: write' permission) mask the
+            // outcome of the authorization/rerun logic below. If the reaction
+            // itself fails, fall back to a plain comment with the same message.
+            const react = async (content, fallbackMessage) => {
+              try {
+                await github.rest.reactions.createForIssueComment({
+                  ...context.repo,
+                  comment_id: context.payload.comment.id,
+                  content,
+                });
+              } catch (error) {
+                core.warning(`Failed to react with '${content}' on the comment: ${error.message}`);
+                try {
+                  await github.rest.issues.createComment({
+                    ...context.repo,
+                    issue_number: context.issue.number,
+                    body: fallbackMessage,
+                  });
+                } catch (commentError) {
+                  core.warning(`Failed to post fallback comment too: ${commentError.message}`);
+                }
+              }
+            };
+
             const commentBody = context.payload.comment.body.trim();
             const workflowName = commentBody.slice('/rerun'.length).trim() || null;
             const commenter = context.payload.comment.user.login;
@@ -53,12 +85,9 @@ jobs:
             const isPrAuthor = commenter === pr.user.login;
 
             if (!isMaintainer && !isPrAuthor) {
-              await github.rest.reactions.createForIssueComment({
-                ...context.repo,
-                comment_id: context.payload.comment.id,
-                content: '-1',
-              });
-              core.setFailed(`${commenter} is not authorized to trigger a rerun on this PR.`);
+              const message = `@${commenter} is not authorized to trigger a rerun on this PR.`;
+              await react('-1', message);
+              core.setFailed(message);
               return;
             }
 
@@ -68,32 +97,42 @@ jobs:
               status: 'failure',
             });
 
-            const matchingRuns = workflowName
-              ? runs.workflow_runs.filter(run => run.name.toLowerCase() === workflowName.toLowerCase())
-              : runs.workflow_runs;
+            // 'head_sha' can collide across PRs (e.g. the same branch opened
+            // against two base branches), so also require the run to list
+            // this PR among its associated pull requests when GitHub reports
+            // any association, to avoid rerunning another PR's workflow run.
+            const belongsToThisPr = run =>
+              run.head_sha === pr.head.sha &&
+              (!run.pull_requests?.length || run.pull_requests.some(p => p.number === pr.number));
+
+            const matchingRuns = runs.workflow_runs
+              .filter(belongsToThisPr)
+              .filter(run => !workflowName || run.name.toLowerCase() === workflowName.toLowerCase());
 
             if (matchingRuns.length === 0) {
-              await github.rest.reactions.createForIssueComment({
-                ...context.repo,
-                comment_id: context.payload.comment.id,
-                content: 'confused',
-              });
-              core.info(workflowName
+              const message = workflowName
                 ? `No failed "${workflowName}" workflow run found for the PR head commit.`
-                : 'No failed workflow runs found for the PR head commit.');
+                : 'No failed workflow runs found for the PR head commit.';
+              await react('confused', message);
+              core.info(message);
               return;
             }
 
+            const rerunNames = [];
             for (const run of matchingRuns) {
+              // Defense in depth: never rerun a run that isn't tied to this
+              // PR's current head commit, regardless of how it got into
+              // 'matchingRuns'.
+              if (run.head_sha !== pr.head.sha) {
+                core.warning(`Skipping run ${run.id}: head_sha ${run.head_sha} does not match PR head ${pr.head.sha}.`);
+                continue;
+              }
               core.info(`Re-running failed jobs of run ${run.id} (${run.name})`);
               await github.rest.actions.reRunWorkflowFailedJobs({
                 ...context.repo,
                 run_id: run.id,
               });
+              rerunNames.push(run.name);
             }
 
-            await github.rest.reactions.createForIssueComment({
-              ...context.repo,
-              comment_id: context.payload.comment.id,
-              content: '+1',
-            });
+            await react('+1', `Reran failed jobs of: ${rerunNames.join(', ')}`);
